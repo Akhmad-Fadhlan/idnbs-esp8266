@@ -1,18 +1,174 @@
-/***************************************************
- * ESP8266 MakeCode Library - FIREBASE ENHANCED
- * Enhanced blocks untuk Firebase dengan parsing JSON yang lebih baik
- ***************************************************/
-
+/**
+ * Support for Firebase Realtime Database.
+ * UPDATED: Better read functions, more block options
+ */
 namespace esp8266 {
-    // ==================== FIREBASE READ ENHANCED ====================
-    
+    // ==================== FIREBASE VARIABLES ====================
+    //% blockHidden=true
+    export let firebaseApiKey = ""
+    //% blockHidden=true
+    export let firebaseDatabaseURL = ""
+    //% blockHidden=true
+    export let firebaseProjectId = ""
+    //% blockHidden=true
+    export let firebasePath = "iot" // Default path
+    //% blockHidden=true
+    export let firebaseDataSent = false
+
+    // ==================== FIREBASE HELPER FUNCTIONS ====================
+    // Helper: Extract host from Firebase URL
+    function extractHost(url: string): string {
+        let host = url
+        if (host.indexOf("https://") >= 0) {
+            host = host.substr(8)
+        }
+        if (host.indexOf("http://") >= 0) {
+            host = host.substr(7)
+        }
+        if (host.charAt(host.length - 1) == "/") {
+            host = host.substr(0, host.length - 1)
+        }
+        return host
+    }
+
+    // Helper: Clean path (remove leading slash)
+    function cleanPath(path: string): string {
+        if (path.charAt(0) == "/") {
+            return path.substr(1)
+        }
+        return path
+    }
+
+    // Helper: Extract JSON body from HTTP response
+    function extractJsonFromResponse(response: string): string {
+        // Find body after headers (double CRLF)
+        let bodyStart = response.indexOf("\r\n\r\n")
+        if (bodyStart >= 0) {
+            let body = response.substr(bodyStart + 4)
+            
+            // Find JSON start
+            let jsonStart = body.indexOf("{")
+            if (jsonStart >= 0) {
+                return body.substr(jsonStart)
+            }
+            
+            // Or return direct value (for simple reads)
+            return body
+        }
+        
+        // Fallback: find +IPD marker (old method)
+        let ipdIndex = response.indexOf("+IPD")
+        if (ipdIndex >= 0) {
+            let colonIndex = response.indexOf(":", ipdIndex)
+            if (colonIndex >= 0) {
+                let httpData = response.substr(colonIndex + 1)
+                bodyStart = httpData.indexOf("\r\n\r\n")
+                if (bodyStart >= 0) {
+                    httpData = httpData.substr(bodyStart + 4)
+                }
+                let jsonStart = httpData.indexOf("{")
+                if (jsonStart >= 0) {
+                    return httpData.substr(jsonStart)
+                }
+                return httpData
+            }
+        }
+        
+        return ""
+    }
+
+    // Helper: Parse string to number
+    function parseStringToNumber(valueStr: string): number {
+        let result = 0
+        let isNegative = false
+        let hasDecimal = false
+        let decimalPlace = 0
+
+        for (let i = 0; i < valueStr.length; i++) {
+            let char = valueStr.charAt(i)
+
+            if (char == "-" && i == 0) {
+                isNegative = true
+            } else if (char == ".") {
+                hasDecimal = true
+            } else if (char >= "0" && char <= "9") {
+                let digit = char.charCodeAt(0) - 48
+
+                if (hasDecimal) {
+                    decimalPlace++
+                    result = result + digit / Math.pow(10, decimalPlace)
+                } else {
+                    result = result * 10 + digit
+                }
+            }
+        }
+
+        return isNegative ? -result : result
+    }
+
+    // ==================== FIREBASE PUBLIC API ====================
     /**
-     * Read STRING value from Firebase (improved parsing)
+     * Configure Firebase parameters.
      */
     //% subcategory="Firebase"
-    //% weight=23
+    //% weight=50
     //% blockGap=8
-    //% blockId=esp8266_read_firebase_string
+    //% blockId=esp8266_configure_firebase
+    //% block="Firebase config|API Key %apiKey|URL %databaseURL|Project ID %projectId"
+    //% apiKey.defl="your-api-key"
+    //% databaseURL.defl="https://your-project.firebaseio.com"
+    //% projectId.defl="your-project"
+    export function configureFirebase(apiKey: string, databaseURL: string, projectId: string) {
+        firebaseApiKey = apiKey
+        firebaseDatabaseURL = databaseURL
+        firebaseProjectId = projectId
+    }
+
+    /**
+     * Quick Firebase setup (auto-extract project ID)
+     */
+    //% subcategory="Firebase"
+    //% weight=49
+    //% blockGap=8
+    //% block="quick Firebase setup|URL %url|API Key %apiKey"
+    //% url.defl="https://your-project.firebaseio.com"
+    //% apiKey.defl="your-api-key"
+    export function quickFirebaseSetup(url: string, apiKey: string) {
+        let projectId = ""
+        let hostStart = url.indexOf("://")
+        if (hostStart >= 0) {
+            let host = url.substr(hostStart + 3)
+            let dotIndex = host.indexOf(".")
+            if (dotIndex > 0) {
+                projectId = host.substr(0, dotIndex)
+            }
+        }
+        
+        configureFirebase(apiKey, url, projectId)
+        setFirebasePath("iot")
+    }
+
+    /**
+     * Set Firebase path where all data will be sent.
+     */
+    //% subcategory="Firebase"
+    //% weight=48
+    //% blockGap=8
+    //% blockId=esp8266_set_firebase_path
+    //% block="set Firebase path %path"
+    //% path.defl="iot"
+    export function setFirebasePath(path: string) {
+        firebasePath = path
+    }
+
+    // ==================== FIREBASE READ FUNCTIONS ====================
+
+    /**
+     * Read STRING value from Firebase (IMPROVED)
+     */
+    //% subcategory="Firebase"
+    //% weight=45
+    //% blockGap=8
     //% block="Firebase read STRING of %deviceName"
     //% deviceName.defl="status"
     export function readFirebaseString(deviceName: string): string {
@@ -22,7 +178,7 @@ namespace esp8266 {
         // Validate Firebase configuration
         if (firebaseDatabaseURL == "" || firebaseApiKey == "") return ""
 
-        // Build full path
+        // Build full path to /value field
         let fullPath = cleanPath(firebasePath + "/" + deviceName + "/value")
         let host = extractHost(firebaseDatabaseURL)
 
@@ -47,7 +203,7 @@ namespace esp8266 {
         serial.writeString(httpRequest)
         basic.pause(100)
 
-        // Wait for response
+        // Wait for response (longer timeout for HTTPS)
         let response = getResponse("", 3000)
 
         // Close connection
@@ -73,7 +229,7 @@ namespace esp8266 {
             }
         }
         
-        // Return as-is for numbers
+        // Return as-is for numbers (clean up)
         let cleanBody = ""
         for (let i = 0; i < body.length; i++) {
             let char = body.charAt(i)
@@ -88,12 +244,25 @@ namespace esp8266 {
     }
 
     /**
+     * Read NUMBER value from Firebase (IMPROVED)
+     */
+    //% subcategory="Firebase"
+    //% weight=44
+    //% blockGap=8
+    //% block="Firebase read NUMBER of %deviceName"
+    //% deviceName.defl="temperature"
+    export function readFirebaseNumber(deviceName: string): number {
+        let valueStr = readFirebaseString(deviceName)
+        if (valueStr == "") return 0
+        return parseStringToNumber(valueStr)
+    }
+
+    /**
      * Read BOOLEAN value from Firebase
      */
     //% subcategory="Firebase"
-    //% weight=22
+    //% weight=43
     //% blockGap=8
-    //% blockId=esp8266_read_firebase_boolean
     //% block="Firebase read BOOLEAN of %deviceName"
     //% deviceName.defl="relay"
     export function readFirebaseBoolean(deviceName: string): boolean {
@@ -101,15 +270,147 @@ namespace esp8266 {
         return value == "1" || value == "true" || value == "TRUE"
     }
 
-    // ==================== FIREBASE WRITE BLOCKS ====================
+    /**
+     * Read device value from Firebase (legacy, kept for compatibility)
+     */
+    //% subcategory="Firebase"
+    //% weight=42
+    //% blockGap=40
+    //% blockId=esp8266_read_firebase_value
+    //% block="Firebase read value of %deviceName"
+    //% deviceName.defl="temperature"
+    export function readFirebaseValue(deviceName: string): number {
+        return readFirebaseNumber(deviceName)
+    }
+
+    // ==================== FIREBASE CONTROL BLOCKS ====================
     
+    /**
+     * Check if device command is ON (1 or true)
+     */
+    //% subcategory="Firebase"
+    //% weight=41
+    //% blockGap=8
+    //% block="Firebase %deviceName is ON"
+    //% deviceName.defl="relay1"
+    export function firebaseIsOn(deviceName: string): boolean {
+        return readFirebaseBoolean(deviceName)
+    }
+
+    /**
+     * Check if device command is OFF (0 or false)
+     */
+    //% subcategory="Firebase"
+    //% weight=40
+    //% blockGap=8
+    //% block="Firebase %deviceName is OFF"
+    //% deviceName.defl="relay1"
+    export function firebaseIsOff(deviceName: string): boolean {
+        return !readFirebaseBoolean(deviceName)
+    }
+
+    /**
+     * Get dimmer/slider value from Firebase (0-1024)
+     */
+    //% subcategory="Firebase"
+    //% weight=39
+    //% blockGap=8
+    //% block="Firebase get DIMMER value|%deviceName"
+    //% deviceName.defl="brightness"
+    export function firebaseGetDimmer(deviceName: string): number {
+        return readFirebaseNumber(deviceName)
+    }
+
+    /**
+     * Get slider value in percentage (0-100)
+     */
+    //% subcategory="Firebase"
+    //% weight=38
+    //% blockGap=40
+    //% block="Firebase get PERCENTAGE|%deviceName"
+    //% deviceName.defl="brightness"
+    export function firebaseGetPercentage(deviceName: string): number {
+        let value = firebaseGetDimmer(deviceName)
+        return Math.round((value * 100) / 1024)
+    }
+
+    // ==================== FIREBASE WRITE FUNCTIONS ====================
+
+    /**
+     * Send data to Firebase Realtime Database (CORE FUNCTION)
+     */
+    //% blockHidden=true
+    export function sendFirebaseData(path: string, jsonData: string) {
+        firebaseDataSent = false
+
+        // Validate WiFi connection
+        if (!isWifiConnected()) return
+
+        // Validate Firebase configuration
+        if (firebaseDatabaseURL == "" || firebaseApiKey == "") return
+
+        // Clean path and extract host
+        path = cleanPath(path)
+        let host = extractHost(firebaseDatabaseURL)
+
+        // Connect to Firebase
+        if (!sendCommand("AT+CIPSTART=\"SSL\",\"" + host + "\",443", "OK", 3000)) {
+            return
+        }
+
+        // Build PATCH request (updates without overwriting)
+        let requestPath = "/" + path + ".json?auth=" + firebaseApiKey
+        let httpRequest = "PATCH " + requestPath + " HTTP/1.1\r\n"
+        httpRequest += "Host: " + host + "\r\n"
+        httpRequest += "Content-Type: application/json\r\n"
+        httpRequest += "Content-Length: " + jsonData.length + "\r\n"
+        httpRequest += "Connection: close\r\n"
+        httpRequest += "\r\n"
+        httpRequest += jsonData
+
+        // Send request
+        if (!sendCommand("AT+CIPSEND=" + httpRequest.length, "OK")) {
+            sendCommand("AT+CIPCLOSE", "OK", 1000)
+            return
+        }
+
+        sendCommand(httpRequest, null, 100)
+
+        // Wait for SEND OK
+        if (getResponse("SEND OK", 1500) == "") {
+            sendCommand("AT+CIPCLOSE", "OK", 500)
+            return
+        }
+
+        // Check response status
+        let response = getResponse("", 1500)
+
+        // Check if response contains 200 OK
+        if (response != "" && response.indexOf("200") >= 0) {
+            firebaseDataSent = true
+        }
+
+        // Close connection
+        sendCommand("AT+CIPCLOSE", "OK", 500)
+    }
+
+    /**
+     * Return true if last data sent successfully.
+     */
+    //% subcategory="Firebase"
+    //% weight=37
+    //% blockId=esp8266_is_firebase_data_sent
+    //% block="Firebase data sent"
+    export function isFirebaseDataSent(): boolean {
+        return firebaseDataSent
+    }
+
     /**
      * Write simple NUMBER to Firebase
      */
     //% subcategory="Firebase"
-    //% weight=21
+    //% weight=36
     //% blockGap=8
-    //% blockId=esp8266_firebase_write_number
     //% block="Firebase write NUMBER|name %deviceName|value %value"
     //% deviceName.defl="counter"
     //% value.defl=0
@@ -122,9 +423,8 @@ namespace esp8266 {
      * Write simple STRING to Firebase
      */
     //% subcategory="Firebase"
-    //% weight=20
+    //% weight=35
     //% blockGap=8
-    //% blockId=esp8266_firebase_write_string
     //% block="Firebase write STRING|name %deviceName|value %value"
     //% deviceName.defl="status"
     //% value.defl="OK"
@@ -137,9 +437,8 @@ namespace esp8266 {
      * Write simple BOOLEAN to Firebase
      */
     //% subcategory="Firebase"
-    //% weight=19
+    //% weight=34
     //% blockGap=8
-    //% blockId=esp8266_firebase_write_boolean
     //% block="Firebase write BOOLEAN|name %deviceName|value %value"
     //% deviceName.defl="relay"
     //% value.defl=true
@@ -149,80 +448,59 @@ namespace esp8266 {
         sendFirebaseData(firebasePath, json)
     }
 
-    // ==================== FIREBASE COMMAND BLOCKS ====================
-    
     /**
-     * Check if device command is ON (1 or true)
+     * Send SWITCH data to Firebase.
      */
     //% subcategory="Firebase"
-    //% weight=18
+    //% weight=33
     //% blockGap=8
-    //% blockId=esp8266_firebase_is_on
-    //% block="Firebase %deviceName is ON"
-    //% deviceName.defl="relay1"
-    export function firebaseIsOn(deviceName: string): boolean {
-        return readFirebaseBoolean(deviceName)
+    //% blockId=esp8266_firebase_switch
+    //% block="Firebase send SWITCH|name %deviceName|value %value"
+    //% value.min=0 value.max=1
+    //% deviceName.defl="lampu"
+    export function firebaseSendSwitch(deviceName: string, value: number) {
+        let val = value == 1 ? 1 : 0
+        let json = "{\"" + deviceName + "\":{\"tipe\":\"switch\",\"value\":" + val + "}}"
+        sendFirebaseData(firebasePath, json)
     }
 
     /**
-     * Check if device command is OFF (0 or false)
+     * Send DIMMER data to Firebase.
      */
     //% subcategory="Firebase"
-    //% weight=17
+    //% weight=32
     //% blockGap=8
-    //% blockId=esp8266_firebase_is_off
-    //% block="Firebase %deviceName is OFF"
-    //% deviceName.defl="relay1"
-    export function firebaseIsOff(deviceName: string): boolean {
-        return !readFirebaseBoolean(deviceName)
+    //% blockId=esp8266_firebase_dimmer
+    //% block="Firebase send DIMMER|name %deviceName|value %value"
+    //% value.min=0 value.max=1024
+    //% deviceName.defl="lampu"
+    export function firebaseSendDimmer(deviceName: string, value: number) {
+        let json = "{\"" + deviceName + "\":{\"tipe\":\"dimmer\",\"value\":" + value + ",\"batas_atas\":1024}}"
+        sendFirebaseData(firebasePath, json)
     }
 
     /**
-     * Get dimmer/slider value from Firebase (0-1024)
+     * Send SENSOR reading to Firebase.
      */
     //% subcategory="Firebase"
-    //% weight=16
+    //% weight=31
     //% blockGap=8
-    //% blockId=esp8266_firebase_get_dimmer
-    //% block="Firebase get DIMMER value|%deviceName"
-    //% deviceName.defl="brightness"
-    export function firebaseGetDimmer(deviceName: string): number {
-        let valueStr = readFirebaseString(deviceName)
-        if (valueStr == "") return 0
-        
-        let result = 0
-        for (let i = 0; i < valueStr.length; i++) {
-            let char = valueStr.charAt(i)
-            if (char >= "0" && char <= "9") {
-                result = result * 10 + (char.charCodeAt(0) - 48)
-            }
-        }
-        return result
+    //% blockId=esp8266_firebase_sensor
+    //% block="Firebase send SENSOR|name %deviceName|value %value|unit %unit"
+    //% value.defl=0
+    //% unit.defl="C"
+    //% deviceName.defl="suhu"
+    export function firebaseSendSensor(deviceName: string, value: number, unit: string) {
+        let json = "{\"" + deviceName + "\":{\"tipe\":\"sensor\",\"value\":" + value + ",\"satuan\":\"" + unit + "\"}}"
+        sendFirebaseData(firebasePath, json)
     }
 
-    /**
-     * Get slider value in percentage (0-100)
-     */
-    //% subcategory="Firebase"
-    //% weight=15
-    //% blockGap=40
-    //% blockId=esp8266_firebase_get_percentage
-    //% block="Firebase get PERCENTAGE|%deviceName"
-    //% deviceName.defl="brightness"
-    export function firebaseGetPercentage(deviceName: string): number {
-        let value = firebaseGetDimmer(deviceName)
-        return Math.round((value * 100) / 1024)
-    }
-
-    // ==================== FIREBASE MULTI DATA ====================
-    
     /**
      * Send multiple sensor readings at once
      */
     //% subcategory="Firebase"
-    //% weight=14
+    //% weight=30
     //% blockGap=8
-    //% blockId=esp8266_firebase_send_multi_sensor
     //% block="Firebase send sensors|temp %temp|humid %humid|light %light"
     //% temp.defl=25
     //% humid.defl=60
@@ -240,24 +518,20 @@ namespace esp8266 {
      * Send custom JSON to Firebase path
      */
     //% subcategory="Firebase"
-    //% weight=13
-    //% blockGap=40
-    //% blockId=esp8266_firebase_send_json
+    //% weight=29
+    //% blockGap=8
     //% block="Firebase send JSON|%jsonData"
     //% jsonData.defl='{"status":"OK"}'
     export function firebaseSendJSON(jsonData: string) {
         sendFirebaseData(firebasePath, jsonData)
     }
 
-    // ==================== FIREBASE DELETE ====================
-    
     /**
      * Delete device data from Firebase
      */
     //% subcategory="Firebase"
-    //% weight=12
+    //% weight=28
     //% blockGap=8
-    //% blockId=esp8266_firebase_delete
     //% block="Firebase DELETE %deviceName"
     //% deviceName.defl="old_sensor"
     export function firebaseDelete(deviceName: string) {
@@ -293,36 +567,5 @@ namespace esp8266 {
 
         // Close connection
         sendCommand("AT+CIPCLOSE", "OK", 500)
-    }
-
-    // ==================== HELPER FUNCTIONS (must be public for firebase.ts) ====================
-    
-    /**
-     * Clean path helper - remove leading slash
-     */
-    //% blockHidden=true
-    export function cleanPath(path: string): string {
-        if (path.charAt(0) == "/") {
-            return path.substr(1)
-        }
-        return path
-    }
-
-    /**
-     * Extract host helper - remove protocol and trailing slash
-     */
-    //% blockHidden=true
-    export function extractHost(url: string): string {
-        let host = url
-        if (host.indexOf("https://") >= 0) {
-            host = host.substr(8)
-        }
-        if (host.indexOf("http://") >= 0) {
-            host = host.substr(7)
-        }
-        if (host.charAt(host.length - 1) == "/") {
-            host = host.substr(0, host.length - 1)
-        }
-        return host
     }
 }
